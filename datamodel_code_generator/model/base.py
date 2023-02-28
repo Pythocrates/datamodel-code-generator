@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from functools import lru_cache
@@ -16,14 +18,14 @@ from typing import (
     Tuple,
     Union,
 )
+from warnings import warn
 
 from jinja2 import Environment, FileSystemLoader, Template
-from pydantic import BaseModel
 
 from datamodel_code_generator import cached_property
 from datamodel_code_generator.imports import IMPORT_ANNOTATED, IMPORT_OPTIONAL, Import
 from datamodel_code_generator.reference import Reference, _BaseModel
-from datamodel_code_generator.types import DataType, chain_as_tuple
+from datamodel_code_generator.types import DataType, Nullable, chain_as_tuple
 
 TEMPLATE_DIR: Path = Path(__file__).parents[0] / 'template'
 
@@ -32,8 +34,16 @@ OPTIONAL: str = 'Optional'
 ALL_MODEL: str = '#all#'
 
 
-class ConstraintsBase(BaseModel):
-    ...
+class ConstraintsBase(_BaseModel):
+    _exclude_fields: ClassVar[Set[str]] = {'has_constraints'}
+
+    class Config:
+        arbitrary_types_allowed = True
+        keep_untouched = (cached_property,)
+
+    @cached_property
+    def has_constraints(self) -> bool:
+        return any(v for v in self.dict().values() if v is not None)
 
 
 class DataModelFieldBase(_BaseModel):
@@ -48,6 +58,11 @@ class DataModelFieldBase(_BaseModel):
     parent: Optional[Any] = None
     extras: Dict[str, Any] = {}
     use_annotated: bool = False
+    has_default: bool = False
+    use_field_description: bool = False
+    const: bool = False
+    original_name: Optional[str] = None
+    use_default_kwarg: bool = False
     _exclude_fields: ClassVar[Set[str]] = {'parent'}
     _pass_fields: ClassVar[Set[str]] = {'parent', 'data_type'}
 
@@ -57,6 +72,11 @@ class DataModelFieldBase(_BaseModel):
             super().__init__(**data)
             if self.data_type.reference or self.data_type.data_types:
                 self.data_type.parent = self
+            if 'const' in self.extras:
+                self.default = self.extras['const']
+                self.const = True
+                self.required = False
+                self.nullable = False
 
     @property
     def type_hint(self) -> str:
@@ -64,24 +84,42 @@ class DataModelFieldBase(_BaseModel):
 
         if not type_hint:
             return OPTIONAL
+        elif self.data_type.is_optional and self.data_type.type != 'Any':
+            return type_hint
         elif self.nullable is not None:
             if self.nullable:
-                return f'{OPTIONAL}[{type_hint}]'
+                if self.data_type.use_union_operator:
+                    return f'{type_hint} | None'
+                else:
+                    return f'{OPTIONAL}[{type_hint}]'
             return type_hint
         elif self.required:
             return type_hint
-        return f'{OPTIONAL}[{type_hint}]'
+        if self.data_type.use_union_operator:
+            return f'{type_hint} | None'
+        else:
+            return f'{OPTIONAL}[{type_hint}]'
 
     @property
     def imports(self) -> Tuple[Import, ...]:
         imports: List[Union[Tuple[Import], Iterator[Import]]] = [
             self.data_type.all_imports
         ]
-        if self.nullable or (self.nullable is None and not self.required):
+        if (
+            self.nullable or (self.nullable is None and not self.required)
+        ) and not self.data_type.use_union_operator:
             imports.append((IMPORT_OPTIONAL,))
         if self.use_annotated:
             imports.append((IMPORT_ANNOTATED,))
         return chain_as_tuple(*imports)
+
+    @property
+    def docstring(self) -> Optional[str]:
+        if self.use_field_description:
+            description = self.extras.get('description', None)
+            if description is not None:
+                return f'{description}'
+        return None
 
     @property
     def unresolved_types(self) -> FrozenSet[str]:
@@ -151,7 +189,10 @@ class BaseClassDataType(DataType):
     ...
 
 
-class DataModel(TemplateBase, ABC):
+UNDEFINED: Any = object()
+
+
+class DataModel(TemplateBase, Nullable, ABC):
     TEMPLATE_FILE_PATH: ClassVar[str] = ''
     BASE_CLASS: ClassVar[str] = ''
     DEFAULT_IMPORTS: ClassVar[Tuple[Import, ...]] = ()
@@ -169,18 +210,13 @@ class DataModel(TemplateBase, ABC):
         methods: Optional[List[str]] = None,
         path: Optional[Path] = None,
         description: Optional[str] = None,
+        default: Any = UNDEFINED,
+        nullable: bool = False,
     ) -> None:
         if not self.TEMPLATE_FILE_PATH:
             raise Exception('TEMPLATE_FILE_PATH is undefined')
 
-        template_file_path = Path(self.TEMPLATE_FILE_PATH)
-        if custom_template_dir is not None:
-            custom_template_file_path = custom_template_dir / template_file_path.name
-            if custom_template_file_path.exists():
-                template_file_path = custom_template_file_path
-        self._template_file_path = template_file_path
-
-        self.fields: List[DataModelFieldBase] = fields or []
+        self._custom_template_dir: Optional[Path] = custom_template_dir
         self.decorators: List[str] = decorators or []
         self._additional_imports: List[Import] = []
         self.custom_base_class = custom_base_class
@@ -202,6 +238,8 @@ class DataModel(TemplateBase, ABC):
             else defaultdict(dict)
         )
 
+        self.fields = self._validate_fields(fields) if fields else []
+
         for base_class in self.base_classes:
             if base_class.reference:
                 base_class.reference.children.append(self)
@@ -218,17 +256,41 @@ class DataModel(TemplateBase, ABC):
             field.parent = self
 
         self._additional_imports.extend(self.DEFAULT_IMPORTS)
+        self.default: Any = default
+        self._nullable: bool = nullable
+
+    def _validate_fields(
+        self, fields: List[DataModelFieldBase]
+    ) -> List[DataModelFieldBase]:
+        names: Set[str] = set()
+        unique_fields: List[DataModelFieldBase] = []
+        for field in fields:
+            if field.name:
+                if field.name in names:
+                    warn(f'Field name `{field.name}` is duplicated on {self.name}')
+                    continue
+                else:
+                    names.add(field.name)
+            unique_fields.append(field)
+        return unique_fields
 
     def set_base_class(self) -> None:
-        base_class_import = Import.from_full_path(
-            self.custom_base_class or self.BASE_CLASS
-        )
+        base_class = self.custom_base_class or self.BASE_CLASS
+        if not base_class:
+            self.base_classes = []
+            return None
+        base_class_import = Import.from_full_path(base_class)
         self._additional_imports.append(base_class_import)
         self.base_classes = [BaseClassDataType.from_import(base_class_import)]
 
-    @property
+    @cached_property
     def template_file_path(self) -> Path:
-        return self._template_file_path
+        template_file_path = Path(self.TEMPLATE_FILE_PATH)
+        if self._custom_template_dir is not None:
+            custom_template_file_path = self._custom_template_dir / template_file_path
+            if custom_template_file_path.exists():
+                return custom_template_file_path
+        return template_file_path
 
     @property
     def imports(self) -> Tuple[Import, ...]:
@@ -249,14 +311,35 @@ class DataModel(TemplateBase, ABC):
         return self.reference.name
 
     @property
+    def duplicate_name(self) -> str:
+        return self.reference.duplicate_name or ''
+
+    @property
     def base_class(self) -> str:
         return ', '.join(b.type_hint for b in self.base_classes)
 
+    @staticmethod
+    def _get_class_name(name: str) -> str:
+        if '.' in name:
+            return name.rsplit('.', 1)[-1]
+        return name
+
     @property
     def class_name(self) -> str:
-        if '.' in self.name:
-            return self.name.rsplit('.', 1)[-1]
-        return self.name
+        return self._get_class_name(self.name)
+
+    @class_name.setter
+    def class_name(self, class_name: str) -> None:
+        if '.' in self.reference.name:
+            self.reference.name = (
+                f"{self.reference.name.rsplit('.', 1)[0]}.{class_name}"
+            )
+        else:
+            self.reference.name = class_name
+
+    @property
+    def duplicate_class_name(self) -> str:
+        return self._get_class_name(self.duplicate_name)
 
     @property
     def module_path(self) -> List[str]:
@@ -267,18 +350,22 @@ class DataModel(TemplateBase, ABC):
         return get_module_name(self.name, self.file_path)
 
     @property
-    def all_data_types(self) -> Iterator['DataType']:
+    def all_data_types(self) -> Iterator[DataType]:
         for field in self.fields:
             yield from field.data_type.all_data_types
         yield from self.base_classes
+
+    @property
+    def nullable(self) -> bool:
+        return self._nullable
 
     @cached_property
     def path(self) -> str:
         return self.reference.path
 
-    def render(self) -> str:
+    def render(self, *, class_name: Optional[str] = None) -> str:
         response = self._render(
-            class_name=self.class_name,
+            class_name=class_name or self.class_name,
             fields=self.fields,
             decorators=self.decorators,
             base_class=self.base_class,

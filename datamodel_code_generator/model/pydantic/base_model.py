@@ -1,24 +1,28 @@
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Any, ClassVar, DefaultDict, Dict, List, Optional, Set, Tuple, Union
 
 from pydantic import Field
 
+from datamodel_code_generator import cached_property
 from datamodel_code_generator.imports import Import
 from datamodel_code_generator.model import (
     ConstraintsBase,
     DataModel,
     DataModelFieldBase,
 )
+from datamodel_code_generator.model.base import UNDEFINED
 from datamodel_code_generator.model.pydantic.imports import IMPORT_EXTRA, IMPORT_FIELD
 from datamodel_code_generator.reference import Reference
 from datamodel_code_generator.types import chain_as_tuple
 
 
 class Constraints(ConstraintsBase):
-    gt: Optional[Union[int, float]] = Field(None, alias='exclusiveMinimum')
-    ge: Optional[Union[int, float]] = Field(None, alias='minimum')
-    lt: Optional[Union[int, float]] = Field(None, alias='exclusiveMaximum')
-    le: Optional[Union[int, float]] = Field(None, alias='maximum')
+    gt: Optional[Union[float, int]] = Field(None, alias='exclusiveMinimum')
+    ge: Optional[Union[float, int]] = Field(None, alias='minimum')
+    lt: Optional[Union[float, int]] = Field(None, alias='exclusiveMaximum')
+    le: Optional[Union[float, int]] = Field(None, alias='maximum')
     multiple_of: Optional[float] = Field(None, alias='multipleOf')
     min_items: Optional[int] = Field(None, alias='minItems')
     max_items: Optional[int] = Field(None, alias='maxItems')
@@ -32,7 +36,6 @@ class DataModelField(DataModelFieldBase):
     _EXCLUDE_FIELD_KEYS: ClassVar[Set[str]] = {
         'alias',
         'default',
-        'default_factory',
         'const',
         'gt',
         'ge',
@@ -66,7 +69,12 @@ class DataModelField(DataModelFieldBase):
     def field(self) -> Optional[str]:
         """for backwards compatibility"""
         result = str(self)
-        if result == "":
+        if self.use_default_kwarg and not result.startswith('Field(...'):
+            # Use `default=` for fields that have a default value so that type
+            # checkers using @dataclass_transform can infer the field as
+            # optional in __init__.
+            result = result.replace('Field(', 'Field(default=')
+        if result == '':
             return None
 
         return result
@@ -88,6 +96,27 @@ class DataModelField(DataModelFieldBase):
                 break
         return value
 
+    def _get_default_as_pydantic_model(self) -> Optional[str]:
+        for data_type in self.data_type.data_types or (self.data_type,):
+            # TODO: Check nested data_types
+            if data_type.is_dict or self.data_type.is_union:
+                # TODO: Parse Union and dict model for default
+                continue
+            elif data_type.is_list and len(data_type.data_types) == 1:
+                data_type = data_type.data_types[0]
+                data_type.alias
+                if (
+                    data_type.reference
+                    and isinstance(data_type.reference.source, BaseModel)
+                    and isinstance(self.default, list)
+                ):  # pragma: no cover
+                    return f'lambda :[{data_type.alias or data_type.reference.source.class_name}.parse_obj(v) for v in {repr(self.default)}]'
+            elif data_type.reference and isinstance(
+                data_type.reference.source, BaseModel
+            ):  # pragma: no cover
+                return f'lambda :{data_type.alias or data_type.reference.source.class_name}.parse_obj({repr(self.default)})'
+        return None
+
     def __str__(self) -> str:
         data: Dict[str, Any] = {
             k: v for k, v in self.extras.items() if k not in self._EXCLUDE_FIELD_KEYS
@@ -107,20 +136,45 @@ class DataModelField(DataModelFieldBase):
                 },
             }
 
+        if self.use_field_description:
+            data.pop('description', None)  # Description is part of field docstring
+
+        if self.const:
+            data['const'] = True
+
+        discriminator = data.pop('discriminator', None)
+        if discriminator:
+            if isinstance(discriminator, str):
+                data['discriminator'] = discriminator
+            elif isinstance(discriminator, dict):  # pragma: no cover
+                data['discriminator'] = discriminator['propertyName']
+
+        if self.required:
+            default_factory = None
+        elif self.default and 'default_factory' not in data:
+            default_factory = self._get_default_as_pydantic_model()
+        else:
+            default_factory = data.pop('default_factory', None)
+
         field_arguments = sorted(
-            f"{k}={repr(v)}" for k, v in data.items() if v is not None
+            f'{k}={repr(v)}' for k, v in data.items() if v is not None
         )
-        if not field_arguments:
+
+        if not field_arguments and not default_factory:
             if self.nullable and self.required:
                 return 'Field(...)'  # Field() is for mypy
-            return ""
+            return ''
 
-        kwargs = ",".join(field_arguments)
         if self.use_annotated:
-            return f'Field({kwargs})'
-        value_arg = "..." if self.required else repr(self.default)
+            pass
+        elif self.required:
+            field_arguments = ['...', *field_arguments]
+        elif default_factory:
+            field_arguments = [f'default_factory={default_factory}', *field_arguments]
+        else:
+            field_arguments = [f'{repr(self.default)}', *field_arguments]
 
-        return f'Field({value_arg}, {kwargs})'
+        return f'Field({", ".join(field_arguments)})'
 
     @property
     def annotated(self) -> Optional[str]:
@@ -145,8 +199,9 @@ class BaseModel(DataModel):
         extra_template_data: Optional[DefaultDict[str, Any]] = None,
         path: Optional[Path] = None,
         description: Optional[str] = None,
+        default: Any = UNDEFINED,
+        nullable: bool = False,
     ):
-
         methods: List[str] = [field.method for field in fields if field.method]
 
         super().__init__(
@@ -160,14 +215,19 @@ class BaseModel(DataModel):
             methods=methods,
             path=path,
             description=description,
+            default=default,
+            nullable=nullable,
         )
 
         config_parameters: Dict[str, Any] = {}
 
         additionalProperties = self.extra_template_data.get('additionalProperties')
-        if additionalProperties is not None:
+        allow_extra_fields = self.extra_template_data.get('allow_extra_fields')
+        if additionalProperties is not None or allow_extra_fields:
             config_parameters['extra'] = (
-                'Extra.allow' if additionalProperties else 'Extra.forbid'
+                'Extra.allow'
+                if additionalProperties or allow_extra_fields
+                else 'Extra.forbid'
             )
             self._additional_imports.append(IMPORT_EXTRA)
 
@@ -181,6 +241,10 @@ class BaseModel(DataModel):
                 config_parameters['arbitrary_types_allowed'] = True
                 break
 
+        if isinstance(self.extra_template_data.get('config'), dict):
+            for key, value in self.extra_template_data['config'].items():
+                config_parameters[key] = value
+
         if config_parameters:
             from datamodel_code_generator.model.pydantic import Config
 
@@ -191,3 +255,16 @@ class BaseModel(DataModel):
         if any(f for f in self.fields if f.field):
             return chain_as_tuple(super().imports, (IMPORT_FIELD,))
         return super().imports
+
+    @cached_property
+    def template_file_path(self) -> Path:
+        # This property is for Backward compatibility
+        # Current version supports '{custom_template_dir}/BaseModel.jinja'
+        # But, Future version will support only '{custom_template_dir}/pydantic/BaseModel.jinja'
+        if self._custom_template_dir is not None:
+            custom_template_file_path = (
+                self._custom_template_dir / Path(self.TEMPLATE_FILE_PATH).name
+            )
+            if custom_template_file_path.exists():
+                return custom_template_file_path
+        return super().template_file_path

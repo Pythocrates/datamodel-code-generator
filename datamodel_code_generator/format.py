@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence
@@ -14,10 +16,15 @@ class PythonVersion(Enum):
     PY_38 = '3.8'
     PY_39 = '3.9'
     PY_310 = '3.10'
+    PY_311 = '3.11'
 
     @property
     def has_literal_type(self) -> bool:
-        return self.value >= self.PY_38.value  # type: ignore
+        return self.value not in {self.PY_36.value, self.PY_37.value}  # type: ignore
+
+    @property
+    def has_union_operator(self) -> bool:  # pragma: no cover
+        return self.value not in {self.PY_36.value, self.PY_37.value, self.PY_38.value, self.PY_39.value}  # type: ignore
 
 
 if TYPE_CHECKING:
@@ -62,16 +69,17 @@ class CodeFormatter:
         python_version: PythonVersion,
         settings_path: Optional[Path] = None,
         wrap_string_literal: Optional[bool] = None,
+        skip_string_normalization: bool = True,
     ):
         if not settings_path:
             settings_path = Path().resolve()
 
         root = black_find_project_root((settings_path,))
-        path = root / "pyproject.toml"
+        path = root / 'pyproject.toml'
         if path.is_file():
             value = str(path)
             pyproject_toml = toml.load(value)
-            config = pyproject_toml.get("tool", {}).get("black", {})
+            config = pyproject_toml.get('tool', {}).get('black', {})
         else:
             config = {}
 
@@ -86,7 +94,7 @@ class CodeFormatter:
         if experimental_string_processing is not None:  # pragma: no cover
             if black.__version__.startswith('19.'):  # type: ignore
                 warn(
-                    f'black doesn\'t support `experimental-string-processing` option'  # type: ignore
+                    f"black doesn't support `experimental-string-processing` option"  # type: ignore
                     f' for wrapping string literal in {black.__version__}'
                 )
             else:
@@ -95,12 +103,13 @@ class CodeFormatter:
                 ] = experimental_string_processing
 
         if TYPE_CHECKING:
-            self.back_mode: black.FileMode
+            self.black_mode: black.FileMode
         else:
-            self.back_mode = black.FileMode(
+            self.black_mode = black.FileMode(
                 target_versions={BLACK_PYTHON_VERSION[python_version]},
-                line_length=config.get("line-length", black.DEFAULT_LINE_LENGTH),
-                string_normalization=not config.get("skip-string-normalization", True),
+                line_length=config.get('line-length', black.DEFAULT_LINE_LENGTH),
+                string_normalization=not skip_string_normalization
+                or not config.get('skip-string-normalization', True),
                 **black_kwargs,
             )
 
@@ -121,7 +130,7 @@ class CodeFormatter:
     def apply_black(self, code: str) -> str:
         return black.format_str(
             code,
-            mode=self.back_mode,
+            mode=self.black_mode,
         )
 
     if isort.__version__.startswith('4.'):

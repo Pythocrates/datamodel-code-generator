@@ -12,13 +12,15 @@ from pydantic import BaseModel, Field
 class Extras(BaseModel):
     name: Optional[str] = Field(
         None,
-        _comment='comment',
-        _exclude=123,
-        _invalid_key_2='efg',
         description='normal key',
+        field_comment='comment',
+        field_exclude=123,
+        field_invalid_key_2='efg',
         invalid_key_1='abc',
         key1=123,
         key2=456,
         register_='hij',
+        repr=True,
         schema_='klm',
+        x_abc=True,
     )

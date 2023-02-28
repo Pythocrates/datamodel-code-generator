@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 from collections import defaultdict
 from contextlib import contextmanager
@@ -8,6 +10,7 @@ from keyword import iskeyword
 from pathlib import Path, PurePath
 from typing import (
     TYPE_CHECKING,
+    AbstractSet,
     Any,
     Callable,
     ClassVar,
@@ -16,6 +19,7 @@ from typing import (
     Generator,
     List,
     Mapping,
+    NamedTuple,
     Optional,
     Pattern,
     Sequence,
@@ -25,14 +29,17 @@ from typing import (
     TypeVar,
     Union,
 )
+from urllib.parse import ParseResult, urlparse
 
 import inflect
+import pydantic
+from packaging import version
 from pydantic import BaseModel, validator
 
 from datamodel_code_generator import cached_property
 
 if TYPE_CHECKING:
-    from pydantic.typing import AbstractSetIntStr, DictStrAny, MappingIntStrAny
+    from pydantic.typing import DictStrAny
 
 
 class _BaseModel(BaseModel):
@@ -50,14 +57,18 @@ class _BaseModel(BaseModel):
     def dict(
         self,
         *,
-        include: Union['AbstractSetIntStr', 'MappingIntStrAny'] = None,
-        exclude: Union['AbstractSetIntStr', 'MappingIntStrAny'] = None,
+        include: Union[
+            AbstractSet[Union[int, str]], Mapping[Union[int, str], Any], None
+        ] = None,
+        exclude: Union[
+            AbstractSet[Union[int, str]], Mapping[Union[int, str], Any], None
+        ] = None,
         by_alias: bool = False,
-        skip_defaults: bool = None,
+        skip_defaults: Optional[bool] = None,
         exclude_unset: bool = False,
         exclude_defaults: bool = False,
         exclude_none: bool = False,
-    ) -> 'DictStrAny':
+    ) -> DictStrAny:
         return super().dict(
             include=include,
             exclude=set(exclude or ()) | self._exclude_fields,
@@ -73,10 +84,11 @@ class Reference(_BaseModel):
     path: str
     original_name: str = ''
     name: str
+    duplicate_name: Optional[str]
     loaded: bool = True
     source: Optional[Any] = None
     children: List[Any] = []
-    _exclude_fields: ClassVar = {'children'}
+    _exclude_fields: ClassVar[Set[str]] = {'children'}
 
     @validator('original_name')
     def validate_original_name(cls, v: Any, values: Dict[str, Any]) -> str:
@@ -90,6 +102,11 @@ class Reference(_BaseModel):
     class Config:
         arbitrary_types_allowed = True
         keep_untouched = (cached_property,)
+        copy_on_model_validation = (
+            False
+            if version.parse(pydantic.VERSION) < version.parse('1.9.2')
+            else 'none'
+        )
 
     @property
     def short_name(self) -> str:
@@ -115,7 +132,7 @@ def context_variable(
         setter(previous_value)
 
 
-_UNDER_SCORE_1: Pattern[str] = re.compile(r'(.)([A-Z][a-z]+)')
+_UNDER_SCORE_1: Pattern[str] = re.compile(r'([^_])([A-Z][a-z]+)')
 _UNDER_SCORE_2: Pattern[str] = re.compile('([a-z0-9])([A-Z])')
 
 
@@ -132,11 +149,19 @@ class FieldNameResolver:
         snake_case_field: bool = False,
         empty_field_name: Optional[str] = None,
         original_delimiter: Optional[str] = None,
+        special_field_name_prefix: Optional[str] = None,
+        remove_special_field_name_prefix: bool = False,
+        capitalise_enum_members: bool = False,
     ):
         self.aliases: Mapping[str, str] = {} if aliases is None else {**aliases}
         self.empty_field_name: str = empty_field_name or '_'
         self.snake_case_field = snake_case_field
         self.original_delimiter: Optional[str] = original_delimiter
+        self.special_field_name_prefix: Optional[str] = (
+            'field' if special_field_name_prefix is None else special_field_name_prefix
+        )
+        self.remove_special_field_name_prefix: bool = remove_special_field_name_prefix
+        self.capitalise_enum_members: bool = capitalise_enum_members
 
     @classmethod
     def _validate_field_name(cls, field_name: str) -> bool:
@@ -147,6 +172,7 @@ class FieldNameResolver:
         name: str,
         excludes: Optional[Set[str]] = None,
         ignore_snake_case_field: bool = False,
+        upper_camel: bool = False,
     ) -> str:
         if not name:
             name = self.empty_field_name
@@ -160,20 +186,39 @@ class FieldNameResolver:
         ):
             name = snake_to_upper_camel(name, delimiter=self.original_delimiter)
 
-        # TODO: when first character is a number
-        name = re.sub(r'\W', '_', name)
+        name = re.sub(r'[¹²³⁴⁵⁶⁷⁸⁹]|\W', '_', name)
         if name[0].isnumeric():
-            name = f'field_{name}'
-        if self.snake_case_field and not ignore_snake_case_field:
+            name = f'_{name}'
+
+        # We should avoid having a field begin with an underscore, as it
+        # causes pydantic to consider it as private
+        while name.startswith('_'):
+            if self.remove_special_field_name_prefix:
+                name = name[1:]
+            else:
+                name = f'{self.special_field_name_prefix}{name}'
+                break
+        if (
+            self.capitalise_enum_members
+            or self.snake_case_field
+            and not ignore_snake_case_field
+        ):
             name = camel_to_snake(name)
         count = 1
         if iskeyword(name) or not self._validate_field_name(name):
             name += '_'
-        new_name = name
-        while not (
-            new_name.isidentifier() or not self._validate_field_name(new_name)
-        ) or (excludes and new_name in excludes):
-            new_name = f'{name}_{count}'
+        if upper_camel:
+            new_name = snake_to_upper_camel(name)
+        elif self.capitalise_enum_members:
+            new_name = name.upper()
+        else:
+            new_name = name
+        while (
+            not (new_name.isidentifier() or not self._validate_field_name(new_name))
+            or iskeyword(new_name)
+            or (excludes and new_name in excludes)
+        ):
+            new_name = f'{name}{count}' if upper_camel else f'{name}_{count}'
             count += 1
         return new_name
 
@@ -193,7 +238,19 @@ class PydanticFieldNameResolver(FieldNameResolver):
 
 
 class EnumFieldNameResolver(FieldNameResolver):
-    pass
+    def get_valid_name(
+        self,
+        name: str,
+        excludes: Optional[Set[str]] = None,
+        ignore_snake_case_field: bool = False,
+        upper_camel: bool = False,
+    ) -> str:
+        return super().get_valid_name(
+            name='mro_' if name == 'mro' else name,
+            excludes={'mro'} | (excludes or set()),
+            ignore_snake_case_field=ignore_snake_case_field,
+            upper_camel=upper_camel,
+        )
 
 
 class ModelType(Enum):
@@ -207,6 +264,11 @@ DEFAULT_FIELD_NAME_RESOLVERS: Dict[ModelType, Type[FieldNameResolver]] = {
     ModelType.PYDANTIC: PydanticFieldNameResolver,
     ModelType.CLASS: FieldNameResolver,
 }
+
+
+class ClassName(NamedTuple):
+    name: str
+    duplicate_name: Optional[str]
 
 
 def get_relative_path(base_path: PurePath, target_path: PurePath) -> PurePath:
@@ -229,7 +291,7 @@ def get_relative_path(base_path: PurePath, target_path: PurePath) -> PurePath:
 class ModelResolver:
     def __init__(
         self,
-        exclude_names: Set[str] = None,
+        exclude_names: Optional[Set[str]] = None,
         duplicate_name_suffix: Optional[str] = None,
         base_url: Optional[str] = None,
         singular_name_suffix: Optional[str] = None,
@@ -242,6 +304,9 @@ class ModelResolver:
             Dict[ModelType, Type[FieldNameResolver]]
         ] = None,
         original_field_name_delimiter: Optional[str] = None,
+        special_field_name_prefix: Optional[str] = None,
+        remove_special_field_name_prefix: bool = False,
+        capitalise_enum_members: bool = False,
     ) -> None:
         self.references: Dict[str, Reference] = {}
         self._current_root: Sequence[str] = []
@@ -266,6 +331,11 @@ class ModelResolver:
                 snake_case_field=snake_case_field,
                 empty_field_name=empty_field_name,
                 original_delimiter=original_field_name_delimiter,
+                special_field_name_prefix=special_field_name_prefix,
+                remove_special_field_name_prefix=remove_special_field_name_prefix,
+                capitalise_enum_members=capitalise_enum_members
+                if k == ModelType.ENUM
+                else False,
             )
             for k, v in merged_field_name_resolver_classes.items()
         }
@@ -302,7 +372,6 @@ class ModelResolver:
 
     @contextmanager
     def base_url_context(self, base_url: str) -> Generator[None, None, None]:
-
         if self._base_url:
             with context_variable(self.set_base_url, self.base_url, base_url):
                 yield
@@ -391,6 +460,24 @@ class ModelResolver:
             file_part, path_part = ref.split('#', 1)
             if file_part == self.root_id:
                 return f'{"/".join(self.current_root)}#{path_part}'
+            target_url: ParseResult = urlparse(file_part)
+            if not (self.root_id and self.current_base_path):
+                return ref
+            root_id_url: ParseResult = urlparse(self.root_id)
+            if (target_url.scheme, target_url.netloc) == (
+                root_id_url.scheme,
+                root_id_url.netloc,
+            ):  # pragma: no cover
+                target_url_path = Path(target_url.path)
+                relative_target_base = get_relative_path(
+                    Path(root_id_url.path).parent, target_url_path.parent
+                )
+                target_path = (
+                    self.current_base_path / relative_target_base / target_url_path.name
+                )
+                if target_path.exists():
+                    return f'{target_path.resolve().relative_to(self._base_path)}#{path_part}'
+
         return ref
 
     def is_after_load(self, ref: str) -> bool:
@@ -438,7 +525,7 @@ class ModelResolver:
                 if self.is_external_root_ref(path)
                 else split_ref[1]
             )
-        name = self.get_class_name(original_name, unique=False)
+        name = self.get_class_name(original_name, unique=False).name
         reference = Reference(
             path=path,
             original_name=original_name,
@@ -472,8 +559,9 @@ class ModelResolver:
             ):
                 return reference
         name = original_name
+        duplicate_name: Optional[str] = None
         if class_name:
-            name = self.get_class_name(
+            name, duplicate_name = self.get_class_name(
                 name=name,
                 unique=unique,
                 reserved_name=reference.name if reference else None,
@@ -488,14 +576,22 @@ class ModelResolver:
                     name, singular_name_suffix or self.singular_name_suffix
                 )
             elif unique:  # pragma: no cover
-                name = self._get_uniq_name(name)
+                unique_name = self._get_unique_name(name)
+                if unique_name == name:
+                    duplicate_name = name
+                name = unique_name
         if reference:
             reference.original_name = original_name
             reference.name = name
             reference.loaded = loaded
+            reference.duplicate_name = duplicate_name
         else:
             reference = Reference(
-                path=joined_path, original_name=original_name, name=name, loaded=loaded
+                path=joined_path,
+                original_name=original_name,
+                name=name,
+                loaded=loaded,
+                duplicate_name=duplicate_name,
             )
             self.references[joined_path] = reference
         return reference
@@ -503,12 +599,14 @@ class ModelResolver:
     def get(self, path: Union[Sequence[str], str]) -> Optional[Reference]:
         return self.references.get(self.resolve_ref(path))
 
+    def delete(self, path: Union[Sequence[str], str]) -> None:
+        del self.references[self.resolve_ref(path)]
+
     def default_class_name_generator(self, name: str) -> str:
         # TODO: create a validate for class name
-        name = self.field_name_resolvers[ModelType.CLASS].get_valid_name(
-            name, ignore_snake_case_field=True
+        return self.field_name_resolvers[ModelType.CLASS].get_valid_name(
+            name, ignore_snake_case_field=True, upper_camel=True
         )
-        return snake_to_upper_camel(name)
 
     def get_class_name(
         self,
@@ -517,8 +615,7 @@ class ModelResolver:
         reserved_name: Optional[str] = None,
         singular_name: bool = False,
         singular_name_suffix: Optional[str] = None,
-    ) -> str:
-
+    ) -> ClassName:
         if '.' in name:
             split_name = name.split('.')
             prefix = '.'.join(
@@ -540,21 +637,24 @@ class ModelResolver:
             class_name = get_singular_name(
                 class_name, singular_name_suffix or self.singular_name_suffix
             )
-
+        duplicate_name: Optional[str] = None
         if unique:
             if reserved_name == class_name:
-                return class_name
-            class_name = self._get_uniq_name(class_name, camel=True)
+                return ClassName(name=class_name, duplicate_name=duplicate_name)
 
-        return f'{prefix}{class_name}'
+            unique_name = self._get_unique_name(class_name, camel=True)
+            if unique_name != class_name:
+                duplicate_name = class_name
+            class_name = unique_name
+        return ClassName(name=f'{prefix}{class_name}', duplicate_name=duplicate_name)
 
-    def _get_uniq_name(self, name: str, camel: bool = False) -> str:
-        uniq_name: str = name
+    def _get_unique_name(self, name: str, camel: bool = False) -> str:
+        unique_name: str = name
         count: int = 1
         reference_names = {
             r.name for r in self.references.values()
         } | self.exclude_names
-        while uniq_name in reference_names:
+        while unique_name in reference_names:
             if self.duplicate_name_suffix:
                 name_parts: List[Union[str, int]] = [
                     name,
@@ -564,9 +664,9 @@ class ModelResolver:
             else:
                 name_parts = [name, count]
             delimiter = '' if camel else '_'
-            uniq_name = delimiter.join(str(p) for p in name_parts if p)
+            unique_name = delimiter.join(str(p) for p in name_parts if p)
             count += 1
-        return uniq_name
+        return unique_name
 
     @classmethod
     def validate_name(cls, name: str) -> bool:

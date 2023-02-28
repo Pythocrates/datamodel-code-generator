@@ -5,7 +5,7 @@ from typing import List, Optional
 import pydantic
 import pytest
 
-from datamodel_code_generator import PythonVersion
+from datamodel_code_generator import OpenAPIScope, PythonVersion
 from datamodel_code_generator.model import DataModelFieldBase
 from datamodel_code_generator.parser.base import dump_templates
 from datamodel_code_generator.parser.jsonschema import JsonSchemaObject
@@ -42,8 +42,8 @@ def get_expected_file(
     [
         (
             {'properties': {'name': {'type': 'string'}}},
-            '''class Pets(BaseModel):
-    name: Optional[str] = None''',
+            """class Pets(BaseModel):
+    name: Optional[str] = None""",
         ),
         (
             {
@@ -54,12 +54,12 @@ def get_expected_file(
                     }
                 }
             },
-            '''class Kind(BaseModel):
+            """class Kind(BaseModel):
     name: Optional[str] = None
 
 
 class Pets(BaseModel):
-    kind: Optional[Kind] = None''',
+    kind: Optional[Kind] = None""",
         ),
         (
             {
@@ -70,12 +70,12 @@ class Pets(BaseModel):
                     }
                 }
             },
-            '''class Kind(BaseModel):
+            """class Kind(BaseModel):
     name: Optional[str] = None
 
 
 class Pets(BaseModel):
-    Kind: Optional[Kind] = None''',
+    Kind: Optional[Kind] = None""",
         ),
         (
             {
@@ -86,12 +86,12 @@ class Pets(BaseModel):
                     }
                 }
             },
-            '''class PetKind(BaseModel):
+            """class PetKind(BaseModel):
     name: Optional[str] = None
 
 
 class Pets(BaseModel):
-    pet_kind: Optional[PetKind] = None''',
+    pet_kind: Optional[PetKind] = None""",
         ),
         (
             {
@@ -107,17 +107,17 @@ class Pets(BaseModel):
                     }
                 }
             },
-            '''class KindItem(BaseModel):
+            """class KindItem(BaseModel):
     name: Optional[str] = None
 
 
 class Pets(BaseModel):
-    kind: Optional[List[KindItem]] = None''',
+    kind: Optional[List[KindItem]] = None""",
         ),
         (
             {'properties': {'kind': {'type': 'array', 'items': []}}},
-            '''class Pets(BaseModel):
-    kind: Optional[List] = None''',
+            """class Pets(BaseModel):
+    kind: Optional[List] = None""",
         ),
     ],
 )
@@ -135,12 +135,12 @@ def test_parse_object(source_obj, generated_classes):
                 'type': 'array',
                 'items': {'type': 'object', 'properties': {'name': {'type': 'string'}}},
             },
-            '''class Pet(BaseModel):
+            """class Pet(BaseModel):
     name: Optional[str] = None
 
 
 class Pets(BaseModel):
-    __root__: List[Pet]''',
+    __root__: List[Pet]""",
         ),
         (
             {
@@ -149,20 +149,20 @@ class Pets(BaseModel):
                     {'type': 'object', 'properties': {'name': {'type': 'string'}}}
                 ],
             },
-            '''class Pet(BaseModel):
+            """class Pet(BaseModel):
     name: Optional[str] = None
 
 
 class Pets(BaseModel):
-    __root__: List[Pet]''',
+    __root__: List[Pet]""",
         ),
         (
             {
                 'type': 'array',
                 'items': {},
             },
-            '''class Pets(BaseModel):
-    __root__: List''',
+            """class Pets(BaseModel):
+    __root__: List""",
         ),
     ],
 )
@@ -170,29 +170,6 @@ def test_parse_array(source_obj, generated_classes):
     parser = OpenAPIParser('')
     parser.parse_array('Pets', JsonSchemaObject.parse_obj(source_obj), [])
     assert dump_templates(list(parser.results)) == generated_classes
-
-
-@pytest.mark.parametrize(
-    'source_obj,generated_classes',
-    [
-        (
-            {'type': 'string', 'nullable': True},
-            '''class Name(BaseModel):
-    __root__: Optional[str] = None''',
-        ),
-        (
-            {'type': 'string', 'nullable': False},
-            '''class Name(BaseModel):
-    __root__: str''',
-        ),
-    ],
-)
-def test_parse_root_type(source_obj, generated_classes):
-    parser = OpenAPIParser('')
-    parsed_templates = parser.parse_root_type(
-        'Name', JsonSchemaObject.parse_obj(source_obj)
-    )
-    assert dump_templates(list(parsed_templates)) == generated_classes
 
 
 @pytest.mark.parametrize(
@@ -238,13 +215,13 @@ def test_openapi_parser_parse(with_import, format_, base_class):
     [
         (
             {'type': 'string', 'nullable': True},
-            '''class Name(BaseModel):
-    __root__: Optional[str] = None''',
+            """class Name(BaseModel):
+    __root__: Optional[str] = None""",
         ),
         (
             {'type': 'string', 'nullable': False},
-            '''class Name(BaseModel):
-    __root__: str''',
+            """class Name(BaseModel):
+    __root__: str""",
         ),
     ],
 )
@@ -288,7 +265,7 @@ def test_openapi_parser_parse_lazy_resolved_models():
     )
     assert (
         parser.parse()
-        == '''from __future__ import annotations
+        == """from __future__ import annotations
 
 from typing import List, Optional
 
@@ -322,7 +299,7 @@ class Events(BaseModel):
 class Results(BaseModel):
     envets: Optional[List[Events]] = None
     event: Optional[List[Event]] = None
-'''
+"""
     )
 
 
@@ -333,7 +310,7 @@ def test_openapi_parser_parse_x_enum_varnames():
     print(parser.parse())
     assert (
         parser.parse()
-        == '''from __future__ import annotations
+        == """from __future__ import annotations
 
 from enum import Enum
 
@@ -375,7 +352,7 @@ class UnknownTypeNumber(Enum):
     int_1 = 1
     int_2 = 2
     int_3 = 3
-'''
+"""
     )
 
 
@@ -440,6 +417,20 @@ def test_openapi_parser_parse_nested_oneof():
         parser.parse()
         == (
             EXPECTED_OPEN_API_PATH / 'openapi_parser_parse_nested_oneof' / 'output.py'
+        ).read_text()
+    )
+
+
+def test_openapi_parser_parse_allof_ref():
+    parser = OpenAPIParser(
+        Path(DATA_PATH / 'allof_same_prefix_with_ref.yaml'),
+    )
+    assert (
+        parser.parse()
+        == (
+            EXPECTED_OPEN_API_PATH
+            / 'openapi_parser_parse_allof_same_prefix_with_ref'
+            / 'output.py'
         ).read_text()
     )
 
@@ -597,66 +588,77 @@ def test_openapi_model_resolver():
     }
     assert references == {
         'api.yaml#/components/schemas/Error': {
+            'duplicate_name': None,
             'loaded': True,
             'name': 'Error',
             'original_name': 'Error',
             'path': 'api.yaml#/components/schemas/Error',
         },
         'api.yaml#/components/schemas/Event': {
+            'duplicate_name': None,
             'loaded': True,
             'name': 'Event',
             'original_name': 'Event',
             'path': 'api.yaml#/components/schemas/Event',
         },
         'api.yaml#/components/schemas/Id': {
+            'duplicate_name': None,
             'loaded': True,
             'name': 'Id',
             'original_name': 'Id',
             'path': 'api.yaml#/components/schemas/Id',
         },
         'api.yaml#/components/schemas/Pet': {
+            'duplicate_name': None,
             'loaded': True,
             'name': 'Pet',
             'original_name': 'Pet',
             'path': 'api.yaml#/components/schemas/Pet',
         },
         'api.yaml#/components/schemas/Pets': {
+            'duplicate_name': None,
             'loaded': True,
             'name': 'Pets',
             'original_name': 'Pets',
             'path': 'api.yaml#/components/schemas/Pets',
         },
         'api.yaml#/components/schemas/Result': {
+            'duplicate_name': None,
             'loaded': True,
             'name': 'Result',
             'original_name': 'Result',
             'path': 'api.yaml#/components/schemas/Result',
         },
         'api.yaml#/components/schemas/Rules': {
+            'duplicate_name': None,
             'loaded': True,
             'name': 'Rules',
             'original_name': 'Rules',
             'path': 'api.yaml#/components/schemas/Rules',
         },
         'api.yaml#/components/schemas/Users': {
+            'duplicate_name': None,
             'loaded': True,
             'name': 'Users',
             'original_name': 'Users',
             'path': 'api.yaml#/components/schemas/Users',
         },
         'api.yaml#/components/schemas/Users/Users/0#-datamodel-code-generator-#-object-#-special-#': {
+            'duplicate_name': None,
             'loaded': True,
             'name': 'User',
             'original_name': 'Users',
             'path': 'api.yaml#/components/schemas/Users/Users/0#-datamodel-code-generator-#-object-#-special-#',
         },
         'api.yaml#/components/schemas/apis': {
+            'duplicate_name': None,
             'loaded': True,
             'name': 'Apis',
             'original_name': 'apis',
             'path': 'api.yaml#/components/schemas/apis',
         },
         'api.yaml#/components/schemas/apis/apis/0#-datamodel-code-generator-#-object-#-special-#': {
+            'duplicate_name': None,
             'loaded': True,
             'name': 'Api',
             'original_name': 'apis',
@@ -674,5 +676,56 @@ def test_openapi_parser_parse_any():
         parser.parse()
         == (
             EXPECTED_OPEN_API_PATH / 'openapi_parser_parse_any' / 'output.py'
+        ).read_text()
+    )
+
+
+def test_openapi_parser_responses_without_content():
+    parser = OpenAPIParser(
+        data_model_field_type=DataModelFieldBase,
+        source=Path(DATA_PATH / 'body_and_parameters.yaml'),
+        openapi_scopes=[OpenAPIScope.Paths],
+        allow_responses_without_content=True,
+    )
+    assert (
+        parser.parse()
+        == (
+            EXPECTED_OPEN_API_PATH
+            / 'openapi_parser_responses_without_content'
+            / 'output.py'
+        ).read_text()
+    )
+
+
+def test_openapi_parser_responses_with_tag():
+    parser = OpenAPIParser(
+        data_model_field_type=DataModelFieldBase,
+        source=Path(DATA_PATH / 'body_and_parameters.yaml'),
+        openapi_scopes=[OpenAPIScope.Tags, OpenAPIScope.Schemas, OpenAPIScope.Paths],
+    )
+    assert (
+        parser.parse()
+        == (
+            EXPECTED_OPEN_API_PATH / 'openapi_parser_responses_with_tag' / 'output.py'
+        ).read_text()
+    )
+
+
+def test_openapi_parser_with_query_parameters():
+    parser = OpenAPIParser(
+        data_model_field_type=DataModelFieldBase,
+        source=Path(DATA_PATH / 'query_parameters.yaml'),
+        openapi_scopes=[
+            OpenAPIScope.Parameters,
+            OpenAPIScope.Schemas,
+            OpenAPIScope.Paths,
+        ],
+    )
+    assert (
+        parser.parse()
+        == (
+            EXPECTED_OPEN_API_PATH
+            / 'openapi_parser_with_query_parameters'
+            / 'output.py'
         ).read_text()
     )

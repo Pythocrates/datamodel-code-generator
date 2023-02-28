@@ -182,7 +182,7 @@ def test_main_custom_template_dir(capsys: CaptureFixture) -> None:
 def test_pyproject():
     with TemporaryDirectory() as output_dir:
         output_dir = Path(output_dir)
-        pyproject_toml = Path(DATA_PATH) / "project" / "pyproject.toml"
+        pyproject_toml = Path(DATA_PATH) / 'project' / 'pyproject.toml'
         shutil.copy(pyproject_toml, output_dir)
         output_file: Path = output_dir / 'output.py'
         return_code: Exit = main(
@@ -210,7 +210,7 @@ def test_main_use_schema_description():
         return_code: Exit = main(
             [
                 '--input',
-                str(OPEN_API_DATA_PATH / 'api.yaml'),
+                str(OPEN_API_DATA_PATH / 'api_multiline_docstrings.yaml'),
                 '--output',
                 str(output_file),
                 '--use-schema-description',
@@ -223,6 +223,30 @@ def test_main_use_schema_description():
                 EXPECTED_MAIN_KR_PATH / 'main_use_schema_description' / 'output.py'
             ).read_text()
         )
+
+    with pytest.raises(SystemExit):
+        main()
+
+
+@freeze_time('2022-11-11')
+def test_main_use_field_description():
+    with TemporaryDirectory() as output_dir:
+        output_file: Path = Path(output_dir) / 'output.py'
+        return_code: Exit = main(
+            [
+                '--input',
+                str(OPEN_API_DATA_PATH / 'api_multiline_docstrings.yaml'),
+                '--output',
+                str(output_file),
+                '--use-field-description',
+            ]
+        )
+        assert return_code == Exit.OK
+        generated = output_file.read_text()
+        expected = (
+            EXPECTED_MAIN_KR_PATH / 'main_use_field_description' / 'output.py'
+        ).read_text()
+        assert generated == expected
 
     with pytest.raises(SystemExit):
         main()

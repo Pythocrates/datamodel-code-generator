@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from enum import Enum, auto
 from itertools import chain
@@ -19,6 +21,8 @@ from typing import (
     Union,
 )
 
+import pydantic
+from packaging import version
 from pydantic import StrictBool, StrictInt, StrictStr, create_model
 
 from datamodel_code_generator import Protocol, runtime_checkable
@@ -60,13 +64,25 @@ class Modular(Protocol):
         raise NotImplementedError
 
 
+@runtime_checkable
+class Nullable(Protocol):
+    @property
+    def nullable(self) -> bool:
+        raise NotImplementedError
+
+
 class DataType(_BaseModel):
     class Config:
-        extra = "forbid"
+        extra = 'forbid'
+        copy_on_model_validation = (
+            False
+            if version.parse(pydantic.VERSION) < version.parse('1.9.2')
+            else 'none'
+        )
 
     type: Optional[str]
     reference: Optional[Reference]
-    data_types: List['DataType'] = []
+    data_types: List[DataType] = []
     is_func: bool = False
     kwargs: Optional[Dict[str, Any]]
     import_: Optional[Import] = None
@@ -78,18 +94,19 @@ class DataType(_BaseModel):
     literals: List[Union[StrictBool, StrictInt, StrictStr]] = []
     use_standard_collections: bool = False
     use_generic_container: bool = False
+    use_union_operator: bool = False
     alias: Optional[str] = None
     parent: Optional[Any] = None
     children: List[Any] = []
     strict: bool = False
-    dict_key: Optional['DataType'] = None
+    dict_key: Optional[DataType] = None
 
     _exclude_fields: ClassVar[Set[str]] = {'parent', 'children'}
     _pass_fields: ClassVar[Set[str]] = {'parent', 'children', 'data_types', 'reference'}
 
     @classmethod
     def from_import(
-        cls: Type['DataTypeT'],
+        cls: Type[DataTypeT],
         import_: Import,
         *,
         is_optional: bool = False,
@@ -123,16 +140,22 @@ class DataType(_BaseModel):
             | ({self.reference.path} if self.reference else set())
         )
 
-    def replace_reference(self, reference: Reference) -> None:
+    def replace_reference(self, reference: Optional[Reference]) -> None:
         if not self.reference:  # pragma: no cover
             raise Exception(
-                f'`{self.__class__.__name__}.replace_reference()` can\'t be called'
+                f"`{self.__class__.__name__}.replace_reference()` can't be called"
                 f' when `reference` field is empty.'
             )
-
-        self.reference.children.remove(self)
+        self_id = id(self)
+        self.reference.children = [
+            c for c in self.reference.children if id(c) != self_id
+        ]
         self.reference = reference
-        reference.children.append(self)
+        if reference:
+            reference.children.append(self)
+
+    def remove_reference(self) -> None:
+        self.replace_reference(None)
 
     @property
     def module_name(self) -> Optional[str]:
@@ -148,7 +171,7 @@ class DataType(_BaseModel):
         return self.reference.short_name  # type: ignore
 
     @property
-    def all_data_types(self) -> Iterator['DataType']:
+    def all_data_types(self) -> Iterator[DataType]:
         for data_type in self.data_types:
             yield from data_type.all_data_types
         yield self
@@ -164,8 +187,8 @@ class DataType(_BaseModel):
         if self.import_:
             yield self.import_
         imports: Tuple[Tuple[bool, Import], ...] = (
-            (self.is_optional, IMPORT_OPTIONAL),
-            (len(self.data_types) > 1, IMPORT_UNION),
+            (self.is_optional and not self.use_union_operator, IMPORT_OPTIONAL),
+            (len(self.data_types) > 1 and not self.use_union_operator, IMPORT_UNION),
         )
         if any(self.literals):
             import_literal = (
@@ -233,7 +256,12 @@ class DataType(_BaseModel):
         type_: Optional[str] = self.alias or self.type
         if not type_:
             if self.is_union:
-                type_ = f"Union[{', '.join(data_type.type_hint for data_type in self.data_types)}]"
+                if self.use_union_operator:
+                    type_ = ' | '.join(
+                        data_type.type_hint for data_type in self.data_types
+                    )
+                else:
+                    type_ = f"Union[{', '.join(data_type.type_hint for data_type in self.data_types)}]"
             elif len(self.data_types) == 1:
                 type_ = self.data_types[0].type_hint
             elif self.literals:
@@ -247,6 +275,10 @@ class DataType(_BaseModel):
                     # TODO support strict Any
                     # type_ = 'Any'
                     type_ = ''
+        if self.reference:
+            source = self.reference.source
+            if isinstance(source, Nullable) and source.nullable:
+                self.is_optional = True
         if self.reference and self.python_version == PythonVersion.PY_36:
             type_ = f"'{type_}'"
         if self.is_list:
@@ -270,7 +302,10 @@ class DataType(_BaseModel):
             else:  # pragma: no cover
                 type_ = dict_
         if self.is_optional and type_ != 'Any':
-            type_ = f'Optional[{type_}]'
+            if self.use_union_operator:  # pragma: no cover
+                type_ = f'{type_} | None'
+            else:
+                type_ = f'Optional[{type_}]'
         elif self.is_func:
             if self.kwargs:
                 kwargs: str = ', '.join(f'{k}={v}' for k, v in self.kwargs.items())
@@ -286,6 +321,10 @@ class DataType(_BaseModel):
 DataType.update_forward_refs()
 
 DataTypeT = TypeVar('DataTypeT', bound=DataType)
+
+
+class EmptyDataType(DataType):
+    pass
 
 
 class Types(Enum):
@@ -313,7 +352,9 @@ class Types(Enum):
     uri = auto()
     hostname = auto()
     ipv4 = auto()
+    ipv4_network = auto()
     ipv6 = auto()
+    ipv6_network = auto()
     boolean = auto()
     object = auto()
     null = auto()
@@ -329,6 +370,7 @@ class DataTypeManager(ABC):
         use_generic_container_types: bool = False,
         strict_types: Optional[Sequence[StrictTypes]] = None,
         use_non_positive_negative_number_constrained_types: bool = False,
+        use_union_operator: bool = False,
     ) -> None:
         self.python_version = python_version
         self.use_standard_collections: bool = use_standard_collections
@@ -337,13 +379,14 @@ class DataTypeManager(ABC):
         self.use_non_positive_negative_number_constrained_types: bool = (
             use_non_positive_negative_number_constrained_types
         )
+        self.use_union_operator: bool = use_union_operator
 
         if (
             use_generic_container_types and python_version == PythonVersion.PY_36
         ):  # pragma: no cover
             raise Exception(
-                "use_generic_container_types can not be used with target_python_version 3.6.\n"
-                " The version will be not supported in a future version"
+                'use_generic_container_types can not be used with target_python_version 3.6.\n'
+                ' The version will be not supported in a future version'
             )
 
         if TYPE_CHECKING:
@@ -354,6 +397,7 @@ class DataTypeManager(ABC):
                 python_version=python_version,
                 use_standard_collections=use_standard_collections,
                 use_generic_container=use_generic_container_types,
+                use_union_operator=use_union_operator,
                 __base__=DataType,
             )
 
@@ -367,3 +411,21 @@ class DataTypeManager(ABC):
         return self.data_type.from_import(
             Import.from_full_path(full_path), is_custom_type=is_custom_type
         )
+
+    def get_data_type_from_value(self, value: Any) -> DataType:
+        type_: Optional[Types] = None
+        if isinstance(value, str):
+            type_ = Types.string
+        elif isinstance(value, bool):
+            type_ = Types.boolean
+        elif isinstance(value, int):
+            type_ = Types.integer
+        elif isinstance(value, float):
+            type_ = Types.float
+        elif isinstance(value, dict):
+            return self.data_type.from_import(IMPORT_DICT)
+        elif isinstance(value, list):
+            return self.data_type.from_import(IMPORT_LIST)
+        else:
+            type_ = Types.any
+        return self.get_data_type(type_)

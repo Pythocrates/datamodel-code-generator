@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import contextlib
 import os
 from datetime import datetime, timezone
@@ -37,11 +39,11 @@ else:
     try:
         from typing import Protocol
     except ImportError:
-        from typing_extensions import Protocol
+        from typing_extensions import Protocol  # noqa
     try:
         from typing import runtime_checkable
     except ImportError:
-        from typing_extensions import runtime_checkable
+        from typing_extensions import runtime_checkable  # noqa
     try:
         from yaml import CSafeLoader as SafeLoader
     except ImportError:  # pragma: no cover
@@ -65,7 +67,6 @@ else:
 
 
 from datamodel_code_generator.format import PythonVersion
-from datamodel_code_generator.model.pydantic import dump_resolve_reference_action
 from datamodel_code_generator.parser import DefaultPutDict, LiteralType
 from datamodel_code_generator.parser.base import Parser
 from datamodel_code_generator.types import StrictTypes
@@ -88,6 +89,26 @@ def load_yaml(stream: Union[str, TextIO]) -> Any:
 def load_yaml_from_path(path: Path, encoding: str) -> Any:
     with path.open(encoding=encoding) as f:
         return load_yaml(f)
+
+
+if TYPE_CHECKING:
+
+    def get_version() -> str:
+        ...
+
+else:
+
+    def get_version() -> str:
+        package = 'datamodel-code-generator'
+
+        try:
+            from importlib.metadata import version
+
+            return version(package)
+        except ImportError:
+            import pkg_resources
+
+            return pkg_resources.get_distribution(package).version
 
 
 def enable_debug_message() -> None:  # pragma: no cover
@@ -136,7 +157,6 @@ def chdir(path: Optional[Path]) -> Iterator[None]:
     else:
         prev_cwd = Path.cwd()
         try:
-
             os.chdir(path if path.is_dir() else path.parent)
             yield
         finally:
@@ -165,9 +185,16 @@ RAW_DATA_TYPES: List[InputFileType] = [
 ]
 
 
+class DataModelType(Enum):
+    PydanticBaseModel = 'pydantic.BaseModel'
+    DataclassesDataclass = 'dataclasses.dataclass'
+
+
 class OpenAPIScope(Enum):
     Schemas = 'schemas'
     Paths = 'paths'
+    Tags = 'tags'
+    Parameters = 'parameters'
 
 
 class Error(Exception):
@@ -201,6 +228,7 @@ def generate(
     input_filename: Optional[str] = None,
     input_file_type: InputFileType = InputFileType.Auto,
     output: Optional[Path] = None,
+    output_model_type: DataModelType = DataModelType.PydanticBaseModel,
     target_python_version: PythonVersion = PythonVersion.PY_37,
     base_class: str = DEFAULT_BASE_CLASS,
     custom_template_dir: Optional[Path] = None,
@@ -211,12 +239,16 @@ def generate(
     strip_default_none: bool = False,
     aliases: Optional[Mapping[str, str]] = None,
     disable_timestamp: bool = False,
+    enable_version_header: bool = False,
     allow_population_by_field_name: bool = False,
+    allow_extra_fields: bool = False,
     apply_default_values_for_required_fields: bool = False,
     force_optional_for_required_fields: bool = False,
     class_name: Optional[str] = None,
     use_standard_collections: bool = False,
     use_schema_description: bool = False,
+    use_field_description: bool = False,
+    use_default_kwarg: bool = False,
     reuse_model: bool = False,
     encoding: str = 'utf-8',
     enum_field_as_literal: Optional[LiteralType] = None,
@@ -231,6 +263,7 @@ def generate(
     custom_class_name_generator: Optional[Callable[[str], str]] = None,
     field_extra_keys: Optional[Set[str]] = None,
     field_include_all_keys: bool = False,
+    field_extra_keys_without_x_prefix: Optional[Set[str]] = None,
     openapi_scopes: Optional[List[OpenAPIScope]] = None,
     wrap_string_literal: Optional[bool] = None,
     use_title_as_name: bool = False,
@@ -239,6 +272,13 @@ def generate(
     use_annotated: bool = False,
     use_non_positive_negative_number_constrained_types: bool = False,
     original_field_name_delimiter: Optional[str] = None,
+    use_double_quotes: bool = False,
+    use_union_operator: bool = False,
+    collapse_root_models: bool = False,
+    special_field_name_prefix: Optional[str] = None,
+    remove_special_field_name_prefix: bool = False,
+    capitalise_enum_members: bool = False,
+    keep_model_order: bool = False,
 ) -> None:
     remote_text_cache: DefaultPutDict[str, str] = DefaultPutDict()
     if isinstance(input_, str):
@@ -267,7 +307,7 @@ def generate(
                 if is_openapi(input_text_)  # type: ignore
                 else InputFileType.JsonSchema
             )
-        except:
+        except:  # noqa
             raise Error('Invalid file format')
 
     kwargs: Dict[str, Any] = {}
@@ -306,7 +346,7 @@ def generate(
                         if isinstance(input_, Path)
                         else input_text
                     )
-            except:
+            except:  # noqa
                 raise Error('Invalid file format')
             import json
 
@@ -318,19 +358,28 @@ def generate(
 
     if isinstance(input_, ParseResult) and input_file_type not in RAW_DATA_TYPES:
         input_text = None
+
+    from datamodel_code_generator.model import get_data_model_types
+
+    data_model_types = get_data_model_types(output_model_type)
     parser = parser_class(
         source=input_text or input_,
+        data_model_type=data_model_types.data_model,
+        data_model_root_type=data_model_types.root_model,
+        data_model_field_type=data_model_types.field_model,
+        data_type_manager_type=data_model_types.data_type_manager,
         base_class=base_class,
         custom_template_dir=custom_template_dir,
         extra_template_data=extra_template_data,
         target_python_version=target_python_version,
-        dump_resolve_reference_action=dump_resolve_reference_action,
+        dump_resolve_reference_action=data_model_types.dump_resolve_reference_action,
         validation=validation,
         field_constraints=field_constraints,
         snake_case_field=snake_case_field,
         strip_default_none=strip_default_none,
         aliases=aliases,
         allow_population_by_field_name=allow_population_by_field_name,
+        allow_extra_fields=allow_extra_fields,
         apply_default_values_for_required_fields=apply_default_values_for_required_fields,
         force_optional_for_required_fields=force_optional_for_required_fields,
         class_name=class_name,
@@ -339,6 +388,8 @@ def generate(
         if isinstance(input_, Path) and input_.is_file()
         else None,
         use_schema_description=use_schema_description,
+        use_field_description=use_field_description,
+        use_default_kwarg=use_default_kwarg,
         reuse_model=reuse_model,
         enum_field_as_literal=enum_field_as_literal,
         set_default_enum_member=set_default_enum_member,
@@ -353,6 +404,7 @@ def generate(
         custom_class_name_generator=custom_class_name_generator,
         field_extra_keys=field_extra_keys,
         field_include_all_keys=field_include_all_keys,
+        field_extra_keys_without_x_prefix=field_extra_keys_without_x_prefix,
         wrap_string_literal=wrap_string_literal,
         use_title_as_name=use_title_as_name,
         http_headers=http_headers,
@@ -360,6 +412,13 @@ def generate(
         use_annotated=use_annotated,
         use_non_positive_negative_number_constrained_types=use_non_positive_negative_number_constrained_types,
         original_field_name_delimiter=original_field_name_delimiter,
+        use_double_quotes=use_double_quotes,
+        use_union_operator=use_union_operator,
+        collapse_root_models=collapse_root_models,
+        special_field_name_prefix=special_field_name_prefix,
+        remove_special_field_name_prefix=remove_special_field_name_prefix,
+        capitalise_enum_members=capitalise_enum_members,
+        keep_model_order=keep_model_order,
         **kwargs,
     )
 
@@ -375,7 +434,6 @@ def generate(
     if not results:
         raise Error('Models not found in the input data')
     elif isinstance(results, str):
-
         modules = {output: (results, input_filename)}
     else:
         if output is None:
@@ -392,11 +450,13 @@ def generate(
 
     timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
-    header = '''\
+    header = """\
 # generated by datamodel-codegen:
-#   filename:  {}'''
+#   filename:  {}"""
     if not disable_timestamp:
         header += f'\n#   timestamp: {timestamp}'
+    if enable_version_header:
+        header += f'\n#   version:   {get_version()}'
 
     file: Optional[IO[Any]]
     for path, body_and_filename in modules.items():

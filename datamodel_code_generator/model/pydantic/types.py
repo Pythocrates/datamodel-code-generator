@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from decimal import Decimal
 from typing import Any, Dict, Optional, Sequence, Set, Type
 
@@ -19,7 +21,9 @@ from datamodel_code_generator.model.pydantic.imports import (
     IMPORT_CONSTR,
     IMPORT_EMAIL_STR,
     IMPORT_IPV4ADDRESS,
+    IMPORT_IPV4NETWORKS,
     IMPORT_IPV6ADDRESS,
+    IMPORT_IPV6NETWORKS,
     IMPORT_NEGATIVE_FLOAT,
     IMPORT_NEGATIVE_INT,
     IMPORT_NON_NEGATIVE_FLOAT,
@@ -86,6 +90,8 @@ def type_map_factory(
         ),
         Types.ipv4: data_type.from_import(IMPORT_IPV4ADDRESS),
         Types.ipv6: data_type.from_import(IMPORT_IPV6ADDRESS),
+        Types.ipv4_network: data_type.from_import(IMPORT_IPV4NETWORKS),
+        Types.ipv6_network: data_type.from_import(IMPORT_IPV6NETWORKS),
         Types.boolean: data_type(type='bool'),
         Types.object: data_type.from_import(IMPORT_ANY, is_dict=True),
         Types.null: data_type.from_import(IMPORT_ANY, is_optional=True),
@@ -157,6 +163,7 @@ class DataTypeManager(_DataTypeManager):
         use_generic_container_types: bool = False,
         strict_types: Optional[Sequence[StrictTypes]] = None,
         use_non_positive_negative_number_constrained_types: bool = False,
+        use_union_operator: bool = False,
     ):
         super().__init__(
             python_version,
@@ -164,6 +171,7 @@ class DataTypeManager(_DataTypeManager):
             use_generic_container_types,
             strict_types,
             use_non_positive_negative_number_constrained_types,
+            use_union_operator,
         )
 
         self.type_map: Dict[Types, DataType] = type_map_factory(
