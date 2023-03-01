@@ -55,6 +55,7 @@ class DataModelFieldBase(_BaseModel):
     constraints: Any = None
     strip_default_none: bool = False
     nullable: Optional[bool] = None
+    constant: Optional[bool] = False
     parent: Optional[Any] = None
     extras: Dict[str, Any] = {}
     use_annotated: bool = False

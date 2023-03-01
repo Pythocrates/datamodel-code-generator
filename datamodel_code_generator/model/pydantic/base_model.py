@@ -6,7 +6,7 @@ from typing import Any, ClassVar, DefaultDict, Dict, List, Optional, Set, Tuple,
 from pydantic import Field
 
 from datamodel_code_generator import cached_property
-from datamodel_code_generator.imports import Import
+from datamodel_code_generator.imports import IMPORT_LITERAL, Import
 from datamodel_code_generator.model import (
     ConstraintsBase,
     DataModel,
@@ -167,6 +167,9 @@ class DataModelField(DataModelFieldBase):
 
         if self.use_annotated:
             pass
+        elif self.constant:
+            # That's quite a shortcut, and we cannot provide a description here.
+            return f'{self.default!r}'
         elif self.required:
             field_arguments = ['...', *field_arguments]
         elif default_factory:
@@ -240,6 +243,9 @@ class BaseModel(DataModel):
             if data_type.is_custom_type:
                 config_parameters['arbitrary_types_allowed'] = True
                 break
+
+        if any(field.constant for field in self.fields):
+            self._additional_imports.append(IMPORT_LITERAL)
 
         if isinstance(self.extra_template_data.get('config'), dict):
             for key, value in self.extra_template_data['config'].items():

@@ -15,6 +15,7 @@ from typing import (
     Generator,
     Iterable,
     List,
+    Literal,
     Mapping,
     Optional,
     Sequence,
@@ -219,6 +220,7 @@ class JsonSchemaObject(BaseModel):
     example: Any
     examples: Any
     default: Any
+    const: Optional[str]
     id: Optional[str] = Field(default=None, alias='$id')
     custom_type_path: Optional[str] = Field(default=None, alias='customTypePath')
     extras: Dict[str, Any] = Field(alias=__extra_key__, default_factory=dict)
@@ -265,6 +267,10 @@ class JsonSchemaObject(BaseModel):
     @cached_property
     def has_constraint(self) -> bool:
         return bool(self.__constraint_fields__ & self.__fields_set__)
+
+    @cached_property
+    def is_constant(self) -> bool:
+        return "const" in self.__fields_set__
 
     @cached_property
     def ref_type(self) -> Optional[JSONReference]:
@@ -514,7 +520,7 @@ class JsonSchemaParser(Parser):
     ) -> DataModelFieldBase:
         return self.data_model_field_type(
             name=field_name,
-            default=field.default,
+            default=field.default if not field.is_constant else field.const,
             data_type=field_type,
             required=required,
             alias=alias,
@@ -522,6 +528,7 @@ class JsonSchemaParser(Parser):
             nullable=field.nullable
             if self.strict_nullable and (field.has_default or required)
             else None,
+            constant=field.is_constant,
             strip_default_none=self.strip_default_none,
             extras=self.get_field_extras(field),
             use_annotated=self.use_annotated,
@@ -877,6 +884,8 @@ class JsonSchemaParser(Parser):
             )
         elif item.ref:
             return self.get_ref_data_type(item.ref)
+        elif item.is_constant:
+            return self.data_type_manager.get_data_type(Literal[item.const])
         elif item.custom_type_path:
             return self.data_type_manager.get_data_type_from_full_path(
                 item.custom_type_path, is_custom_type=True

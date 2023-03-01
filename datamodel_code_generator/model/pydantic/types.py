@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any, Dict, Optional, Sequence, Set, Type
+from typing import Any, Dict, get_origin, Literal, Optional, Sequence, Set, Type
 
 from datamodel_code_generator.format import PythonVersion
 from datamodel_code_generator.imports import (
@@ -285,6 +285,9 @@ class DataTypeManager(_DataTypeManager):
             return self.strict_type_map[StrictTypes.bytes]
         return self.type_map[types]
 
+    def get_data_literal_type(self, types: Types, **kwargs: Any):
+        return DataType(type=f"{types!r}".lstrip("typing."))
+
     def get_data_type(
         self,
         types: Types,
@@ -303,5 +306,7 @@ class DataTypeManager(_DataTypeManager):
         elif types == Types.boolean:
             if StrictTypes.bool in self.strict_types:
                 return self.strict_type_map[StrictTypes.bool]
+        elif get_origin(types) is Literal:
+            return self.get_data_literal_type(types, **kwargs)
 
         return self.type_map[types]
